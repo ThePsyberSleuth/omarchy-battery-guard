@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "thepsybersleuth.battery-guard",
+  "name": "Battery Guard",
+  "version": "1.2.0",
+  "author": "ThePsyberSleuth",
+  "license": "MIT",
+  "description": "Drop-in replacement for the stock battery widget with charge-limit controls and measured battery telemetry",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "GuardWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Battery Guard",
+    "description": "Charge limits, temperature, battery power, and health",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.power"
+  }
+}
