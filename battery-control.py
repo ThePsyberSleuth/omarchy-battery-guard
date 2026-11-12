@@ -11,6 +11,10 @@ import tomllib
 
 SUPPLIES = Path('/sys/class/power_supply')
 ABG_CONFIG = Path('/etc/apple-battery-guard/apple-battery-guard.toml')
+DMI = Path('/sys/class/dmi/id')
+FRAMEWORK_TOOL = Path('/usr/bin/framework_tool')
+SUDO = Path('/usr/bin/sudo')
+FRAMEWORK_TIMEOUT = 5
 
 
 def text(path):
@@ -38,6 +42,46 @@ def active(unit):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
+def framework_supported(bat):
+    """Only use the verified Laptop 12 backend for the internal battery."""
+    product = text(DMI / 'product_name') or ''
+    return (text(DMI / 'sys_vendor') == 'Framework'
+            and (product == 'Laptop 12' or product.startswith('Laptop 12 ('))
+            and bat.name == 'BAT1' and FRAMEWORK_TOOL.is_file())
+
+
+def parse_framework_limits(output):
+    match = re.fullmatch(r'\s*Minimum (\d{1,3})%, Maximum (\d{1,3})%\s*', output)
+    if not match:
+        raise ValueError('Framework tool did not report valid charge limits')
+    minimum, maximum = map(int, match.groups())
+    if not 0 <= minimum <= maximum <= 100:
+        raise ValueError('Framework tool reported invalid charge limits')
+    return minimum, maximum
+
+
+def run_framework(arguments, prefix=()):
+    proc = subprocess.run([*prefix, str(FRAMEWORK_TOOL), *arguments],
+                          capture_output=True, text=True, timeout=FRAMEWORK_TIMEOUT,
+                          env={**os.environ, 'LC_ALL': 'C'})
+    if proc.returncode:
+        raise ValueError('Framework tool failed: ' +
+                         (proc.stderr.strip() or proc.stdout.strip() or 'unknown error')[-300:])
+    # Some framework_tool versions print errors with a successful exit code.
+    return parse_framework_limits(proc.stdout)
+
+
+def framework_limits():
+    try:
+        return run_framework(['--charge-limit'])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if os.geteuid() == 0 or not SUDO.is_file():
+            raise
+    # Query only: never request a password or open a dialog during polling.
+    # This uses existing permissions; the plugin installs no sudo rules.
+    return run_framework(['--charge-limit'], [str(SUDO), '-n', '--'])
+
+
 def metrics(bat):
     def n(key):
         return number(bat / key)
@@ -52,6 +96,15 @@ def metrics(bat):
     temperature = n('temp')
     end = n('charge_control_end_threshold')
     start = n('charge_control_start_threshold')
+    backend = 'sysfs' if end is not None else None
+    backend_error = None
+    if end is None and not (bat / 'charge_control_end_threshold').exists() and framework_supported(bat):
+        backend = 'framework-tool'
+        try:
+            _, end = framework_limits()
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            backend_error = ('Cannot read Framework charge limit. framework_tool needs controller '
+                             'access or existing passwordless sudo for its read-only query. ' + str(exc))
     return dict(name=bat.name, model=text(bat / 'model_name'),
                 capacity=n('capacity'), status=text(bat / 'status') or 'Unknown',
                 charge_ratio=round(now / full * 100, 1) if now is not None and full else None,
@@ -60,6 +113,7 @@ def metrics(bat):
                 temperature=temperature / 10 if temperature is not None else None,
                 cycles=n('cycle_count'), end=end, start=start,
                 can_limit=end is not None, can_start=start is not None,
+                backend=backend, backend_error=backend_error,
                 behaviour=text(bat / 'charge_behaviour'))
 
 
@@ -107,11 +161,25 @@ def apply(name, limit):
     if selected is None:
         raise ValueError('Selected battery is not present')
     threshold = selected / 'charge_control_end_threshold'
-    if not threshold.exists():
+    framework = not threshold.exists() and framework_supported(selected)
+    if not threshold.exists() and not framework:
         raise ValueError('This battery driver does not expose a charge limit')
     conflicts = [unit for unit in ('tlp.service', 'auto-cpufreq.service', 'batctl.service') if active(unit)]
     if conflicts:
         raise ValueError('Another charge manager may overwrite limits: ' + ', '.join(conflicts))
+    if framework:
+        if active('apple-battery-guard.service'):
+            raise ValueError('apple-battery-guard requires a sysfs charge threshold')
+        minimum, _ = framework_limits()
+        if minimum >= limit:
+            raise ValueError(f'The Framework minimum ({minimum}%) must be lower than the new limit')
+        run_framework(['--charge-limit', str(limit)])
+        # Verify with a separate controller query, rather than trusting the setter.
+        _, actual = framework_limits()
+        if actual != limit:
+            raise ValueError(f'Framework controller reports {actual}, not requested limit {limit}')
+        return dict(ok=True, message=f'Charge limit set to {limit}%. Verified with the Framework controller.',
+                    limit=actual, backend='framework-tool')
     old_limit = text(threshold)
     if active('apple-battery-guard.service'):
         if selected != batteries()[0]:
