@@ -681,11 +681,15 @@ Panel {
             }
           }
 
-          InfoPair { label: "Policy"; value: root.snapshot.manager || "Driver only" }
+          InfoPair {
+            label: "Policy"
+            value: root.snapshot.manager || (root.batteryData.backend === "framework-tool" ? "Framework controller" : "Driver only")
+          }
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: text.length > 0
-            text: root.statusError || root.actionMessage
+            text: root.statusError || root.batteryData.backend_error || root.actionMessage
             color: root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
@@ -693,7 +697,7 @@ Panel {
           }
           Text {
             width: parent.width
-            text: (root.batteryData.can_start ? "Sailing policy is not implemented." : "This driver has no start threshold; Sailing Mode is unavailable.")
+            text: (root.batteryData.can_start ? "Sailing policy is not implemented." : "Sailing Mode is unavailable for this battery.")
               + " Temperature is monitored only. Top Up sets 100% until you restore your preferred limit."
             color: root.bar.foreground
             opacity: 0.65
